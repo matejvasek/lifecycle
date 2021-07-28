@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/docker/docker/client"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -240,6 +242,25 @@ func (c *createCmd) Exec() error {
 		}
 	}
 
+	pingCtx, cancelPing := context.WithCancel(context.Background())
+	defer cancelPing()
+	pingDoneChan := make(chan struct{}, 1)
+	// send pings to docker daemon while BUILDING to prevent connection closure
+	go func() {
+		defer func() { pingDoneChan <- struct{}{} }()
+		if c.docker == nil {
+			return
+		}
+		for {
+			select {
+			case <-time.After(time.Millisecond * 500):
+				_, _ = c.docker.Ping(pingCtx)
+			case <-pingCtx.Done():
+				return
+			}
+		}
+	}()
+
 	cmd.DefaultLogger.Phase("BUILDING")
 	err = buildArgs{
 		buildpacksDir: c.buildpacksDir,
@@ -248,6 +269,8 @@ func (c *createCmd) Exec() error {
 		platform:      c.platform,
 		platformDir:   c.platformDir,
 	}.build(group, plan)
+	cancelPing()
+	<-pingDoneChan
 	if err != nil {
 		return err
 	}
